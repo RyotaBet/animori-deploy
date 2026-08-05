@@ -11,8 +11,14 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     exit;
 }
 
-// ключ и модель: файл создаётся владельцем на хостинге
-// <?php define('RYOTA_AI_KEY','...'); define('RYOTA_AI_MODEL','llama-3.3-70b-versatile');
+// Конфиг создаётся владельцем на хостинге (не в git), пример ryota-key.php:
+//   define('RYOTA_AI_URL','https://api.sambanova.ai/v1/chat/completions');
+//   define('RYOTA_AI_KEY','...');
+//   define('RYOTA_AI_MODEL','DeepSeek-V3.1');
+//   // необязательный резервный канал (переживаем сбои первого):
+//   define('RYOTA_AI_URL2','https://api.mistral.ai/v1/chat/completions');
+//   define('RYOTA_AI_KEY2','...');
+//   define('RYOTA_AI_MODEL2','mistral-small-latest');
 $keyFile = __DIR__ . '/ryota-key.php';
 if (!file_exists($keyFile)) {
     http_response_code(503);
@@ -25,7 +31,6 @@ if (!defined('RYOTA_AI_KEY') || RYOTA_AI_KEY === '') {
     echo '{"error":"no-key"}';
     exit;
 }
-$model = defined('RYOTA_AI_MODEL') ? RYOTA_AI_MODEL : 'llama-3.3-70b-versatile';
 
 // лёгкий rate-limit: 20 запросов / 10 минут на IP (PHP 5.6-совместимо: без ??)
 $ip   = preg_replace('/[^0-9a-f.:]/i', '', isset($_SERVER['REMOTE_ADDR']) ? $_SERVER['REMOTE_ADDR'] : 'x');
@@ -94,44 +99,57 @@ $system = <<<TXT
 Стиль: думающий и дружелюбный отаку-эксперт. Русский язык. Обычно 3–8 предложений или структурный список; без воды. Лёгкие отсылки к аниме уместны, перегиб — нет.
 TXT;
 
-$payload = json_encode([
-    'model'       => $model,
-    'temperature' => 0.7,
-    'max_tokens'  => 700,
-    'messages'    => array_merge(
-        [['role' => 'system', 'content' => $system]],
-        $history
-    ),
-], JSON_UNESCAPED_UNICODE);
+// вызов openai-совместимого провайдера; вернёт текст или null
+function ryotaAsk($url, $key, $model, $system, $history) {
+    $payload = json_encode(array(
+        'model'       => $model,
+        'temperature' => 0.7,
+        'max_tokens'  => 900,
+        'messages'    => array_merge(
+            array(array('role' => 'system', 'content' => $system)),
+            $history
+        ),
+    ), JSON_UNESCAPED_UNICODE);
 
-$ch = curl_init('https://api.groq.com/openai/v1/chat/completions');
-curl_setopt_array($ch, [
-    CURLOPT_RETURNTRANSFER => true,
-    CURLOPT_POST           => true,
-    CURLOPT_POSTFIELDS     => $payload,
-    CURLOPT_TIMEOUT        => 60,
-    CURLOPT_CONNECTTIMEOUT => 10,
-    CURLOPT_HTTPHEADER     => [
-        'Content-Type: application/json',
-        'Authorization: Bearer ' . RYOTA_AI_KEY,
-    ],
-]);
-$resp = curl_exec($ch);
-$code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-curl_close($ch);
+    $ch = curl_init($url);
+    curl_setopt_array($ch, array(
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST           => true,
+        CURLOPT_POSTFIELDS     => $payload,
+        CURLOPT_TIMEOUT        => 60,
+        CURLOPT_CONNECTTIMEOUT => 10,
+        CURLOPT_HTTPHEADER     => array(
+            'Content-Type: application/json',
+            'Authorization: Bearer ' . $key,
+        ),
+    ));
+    $resp = curl_exec($ch);
+    $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
 
-if ($resp === false || $code >= 500) {
+    if ($resp === false || $code >= 400) return null;
+    $data = json_decode($resp, true);
+    if (!isset($data['choices'][0]['message']['content'])) return null;
+    $text = $data['choices'][0]['message']['content'];
+    // reasoning-модели (DeepSeek и пр.) могут заворачивать размышления в <think>
+    $text = preg_replace('/<think>[\s\S]*?<\/think>/u', '', $text);
+    return trim($text);
+}
+
+$url   = defined('RYOTA_AI_URL') ? RYOTA_AI_URL : 'https://api.sambanova.ai/v1/chat/completions';
+$model = defined('RYOTA_AI_MODEL') ? RYOTA_AI_MODEL : 'DeepSeek-V3.1';
+
+$text = ryotaAsk($url, RYOTA_AI_KEY, $model, $system, $history);
+
+// резервный канал: сбой первого провайдера посетитель не заметит
+if ($text === null && defined('RYOTA_AI_URL2') && defined('RYOTA_AI_KEY2')) {
+    $model2 = defined('RYOTA_AI_MODEL2') ? RYOTA_AI_MODEL2 : $model;
+    $text = ryotaAsk(RYOTA_AI_URL2, RYOTA_AI_KEY2, $model2, $system, $history);
+}
+
+if ($text === null || $text === '') {
     http_response_code(502);
     echo '{"error":"upstream"}';
     exit;
 }
-$data = json_decode($resp, true);
-$text = isset($data['choices'][0]['message']['content'])
-    ? $data['choices'][0]['message']['content']
-    : null;
-if ($code >= 400 || $text === null) {
-    http_response_code(502);
-    echo '{"error":"upstream"}';
-    exit;
-}
-echo json_encode(['reply' => $text], JSON_UNESCAPED_UNICODE);
+echo json_encode(array('reply' => $text), JSON_UNESCAPED_UNICODE);
