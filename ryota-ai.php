@@ -27,8 +27,8 @@ if (!defined('RYOTA_AI_KEY') || RYOTA_AI_KEY === '') {
 }
 $model = defined('RYOTA_AI_MODEL') ? RYOTA_AI_MODEL : 'llama-3.3-70b-versatile';
 
-// лёгкий rate-limit: 20 запросов / 10 минут на IP
-$ip   = preg_replace('/[^0-9a-f.:]/i', '', $_SERVER['REMOTE_ADDR'] ?? 'x');
+// лёгкий rate-limit: 20 запросов / 10 минут на IP (PHP 5.6-совместимо: без ??)
+$ip   = preg_replace('/[^0-9a-f.:]/i', '', isset($_SERVER['REMOTE_ADDR']) ? $_SERVER['REMOTE_ADDR'] : 'x');
 $rlf  = sys_get_temp_dir() . '/ryota-rl-' . md5($ip);
 $hits = [];
 if (is_file($rlf)) {
@@ -56,9 +56,11 @@ if (!is_array($body) || !isset($body['messages']) || !is_array($body['messages']
 $history = [];
 foreach (array_slice($body['messages'], -12) as $m) {
     if (!is_array($m)) continue;
-    $role = ($m['role'] ?? '') === 'assistant' ? 'assistant' : 'user';
-    $content = mb_substr(trim((string)($m['content'] ?? '')), 0, 2000);
-    if ($content !== '') $history[] = ['role' => $role, 'content' => $content];
+    $roleRaw = isset($m['role']) ? $m['role'] : '';
+    $role = $roleRaw === 'assistant' ? 'assistant' : 'user';
+    $contentRaw = isset($m['content']) ? (string)$m['content'] : '';
+    $content = mb_substr(trim($contentRaw), 0, 2000);
+    if ($content !== '') $history[] = array('role' => $role, 'content' => $content);
 }
 if (!$history) {
     http_response_code(400);
@@ -112,7 +114,9 @@ if ($resp === false || $code >= 500) {
     exit;
 }
 $data = json_decode($resp, true);
-$text = $data['choices'][0]['message']['content'] ?? null;
+$text = isset($data['choices'][0]['message']['content'])
+    ? $data['choices'][0]['message']['content']
+    : null;
 if ($code >= 400 || $text === null) {
     http_response_code(502);
     echo '{"error":"upstream"}';
